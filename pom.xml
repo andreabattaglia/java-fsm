@@ -10,7 +10,7 @@
     <packaging>jar</packaging>
 
     <name>Java FSM Core</name>
-    <description>Dependency-free finite state machine core for Java 21.</description>
+    <description>Dependency-free finite state machine core for Java 21, based on the command-per-state pattern.</description>
     <url>https://github.com/andreabattaglia/java-fsm</url>
 
     <licenses>
@@ -30,12 +30,24 @@
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <slf4j.version>2.0.16</slf4j.version>
         <junit.jupiter.version>5.11.4</junit.jupiter.version>
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

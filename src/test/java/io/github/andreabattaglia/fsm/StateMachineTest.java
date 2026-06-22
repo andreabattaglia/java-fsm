@@ -1,123 +1,87 @@
 package io.github.andreabattaglia.fsm;
 
-import org.junit.jupiter.api.Test;
-
-import java.util.ArrayList;
-import java.util.List;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.List;
+import java.util.Map;
+
+import org.junit.jupiter.api.Test;
+
+import io.github.andreabattaglia.fsm.command.NewOrderCommand;
+import io.github.andreabattaglia.fsm.command.ProcessingOrderCommand;
+import io.github.andreabattaglia.fsm.command.SkipOrderCommand;
+import io.github.andreabattaglia.fsm.command.WrongStateCodeCommand;
 
 class StateMachineTest {
+	@Test
+	void happyPath_runsFromInitialToCompleted() {
+		OrderContext ctx = new OrderContext(100);
 
-    @Test
-    void firesSimpleTransition() {
-        var machine = orderMachineBuilder()
-                .transition(OrderState.NEW, OrderEvent.SUBMIT, OrderState.SUBMITTED)
-                .build();
+		FsmExecutionResult<OrderState> result = new OrderOrchestrator().execute(ctx);
 
-        var result = machine.fire(OrderState.NEW, OrderEvent.SUBMIT, new OrderContext(100, new ArrayList<>()));
+		assertEquals(OrderState.COMPLETED, result.getFinalState());
+		assertEquals(2, result.getSteps());
+		assertEquals(List.of("new", "processed"), ctx.getAuditLog());
+	}
 
-        assertEquals(OrderState.NEW, result.from());
-        assertEquals(OrderEvent.SUBMIT, result.event());
-        assertEquals(OrderState.SUBMITTED, result.to());
-    }
+	@Test
+	void errorPath_commandException_routesToFailed() {
+		OrderContext ctx = new OrderContext(100);
+		ctx.setShouldFail(true);
 
-    @Test
-    void executesGuardAndAction() {
-        var audit = new ArrayList<String>();
-        var machine = orderMachineBuilder()
-                .transition(
-                        OrderState.SUBMITTED,
-                        OrderEvent.APPROVE,
-                        OrderState.APPROVED,
-                        context -> context.payload().amount() <= 1_000,
-                        context -> context.payload().audit().add("approved")
-                )
-                .build();
+		FsmExecutionResult<OrderState> result = new OrderOrchestrator().execute(ctx);
 
-        var result = machine.fire(OrderState.SUBMITTED, OrderEvent.APPROVE, new OrderContext(250, audit));
+		assertEquals(OrderState.FAILED, result.getFinalState());
+		assertEquals(List.of("new"), ctx.getAuditLog());
+	}
 
-        assertEquals(OrderState.APPROVED, result.to());
-        assertEquals(List.of("approved"), audit);
-    }
+	@Test
+	void episodicRun_startsFromGivenState_skipsEarlierStates() {
+		OrderContext ctx = new OrderContext(100);
 
-    @Test
-    void rejectsTransitionWhenGuardFails() {
-        var machine = orderMachineBuilder()
-                .transition(
-                        OrderState.SUBMITTED,
-                        OrderEvent.APPROVE,
-                        OrderState.APPROVED,
-                        context -> context.payload().amount() <= 1_000,
-                        Action.none()
-                )
-                .build();
+		FsmExecutionResult<OrderState> result = new OrderOrchestrator().execute(ctx, OrderState.PROCESSING);
 
-        assertThrows(
-                GuardRejectedException.class,
-                () -> machine.fire(OrderState.SUBMITTED, OrderEvent.APPROVE, new OrderContext(2_000, new ArrayList<>()))
-        );
-    }
+		assertEquals(OrderState.COMPLETED, result.getFinalState());
+		assertEquals(1, result.getSteps());
+		assertEquals(List.of("processed"), ctx.getAuditLog());
+	}
 
-    @Test
-    void failsOnMissingTransition() {
-        var machine = orderMachineBuilder()
-                .transition(OrderState.NEW, OrderEvent.SUBMIT, OrderState.SUBMITTED)
-                .build();
+	@Test
+	void factoryConstruction_failsWhenCommandNotRegisteredForState() {
+		assertThrows(IllegalStateException.class,
+				() -> new AbstractFsmCommandFactory<OrderState, OrderContext>(OrderState.class) {
+					@Override
+					protected void registerCommands(Map<OrderState, FsmCommand<OrderState, OrderContext>> target) {
+						target.put(OrderState.NEW, new NewOrderCommand());
+					}
+				});
+	}
 
-        assertThrows(
-                TransitionNotFoundException.class,
-                () -> machine.fire(OrderState.NEW, OrderEvent.APPROVE, new OrderContext(100, new ArrayList<>()))
-        );
-    }
+	@Test
+	void factoryConstruction_failsOnCommandStateCodeMismatch() {
+		assertThrows(IllegalStateException.class, () -> new AbstractFsmCommandFactory<>(OrderState.class,
+				Map.of(OrderState.NEW, new WrongStateCodeCommand(), OrderState.PROCESSING, new ProcessingOrderCommand(),
+						OrderState.COMPLETED, new NoOpFsmCommand<>(OrderState.COMPLETED), OrderState.FAILED,
+						new NoOpFsmCommand<>(OrderState.FAILED))) {
+		});
+	}
 
-    @Test
-    void failsOnDuplicateTransition() {
-        var builder = orderMachineBuilder()
-                .transition(OrderState.NEW, OrderEvent.SUBMIT, OrderState.SUBMITTED);
+	@Test
+	void skipOutcome_transitionPolicyRoutesDirectlyToTerminal() {
+		FsmCommandFactory<OrderState, OrderContext> factory = new AbstractFsmCommandFactory<>(OrderState.class,
+				Map.of(OrderState.NEW, new SkipOrderCommand(), OrderState.PROCESSING, new ProcessingOrderCommand(),
+						OrderState.COMPLETED, new NoOpFsmCommand<>(OrderState.COMPLETED), OrderState.FAILED,
+						new NoOpFsmCommand<>(OrderState.FAILED))) {
+		};
 
-        assertThrows(
-                DuplicateTransitionException.class,
-                () -> builder.transition(OrderState.NEW, OrderEvent.SUBMIT, OrderState.REJECTED)
-        );
-    }
+		FsmOrchestratorService<OrderState, OrderContext> orchestrator = new FsmOrchestratorService<>(factory,
+				new SkipOrderTransitionPolicy(), new OrderExceptionHandler()) {
+		};
 
-    @Test
-    void exposesDefinitionMetadata() {
-        var machine = orderMachineBuilder()
-                .transition(OrderState.NEW, OrderEvent.SUBMIT, OrderState.SUBMITTED)
-                .transition(OrderState.SUBMITTED, OrderEvent.REJECT, OrderState.REJECTED)
-                .build();
+		FsmExecutionResult<OrderState> result = orchestrator.execute(new OrderContext(0));
 
-        assertEquals(OrderState.NEW, machine.initialState());
-        assertTrue(machine.definition().states().containsAll(List.of(
-                OrderState.NEW,
-                OrderState.SUBMITTED,
-                OrderState.REJECTED
-        )));
-        assertEquals(2, machine.definition().transitions().size());
-    }
-
-    private static StateMachineBuilder<OrderState, OrderEvent, OrderContext> orderMachineBuilder() {
-        return StateMachine.<OrderState, OrderEvent, OrderContext>builder()
-                .initialState(OrderState.NEW);
-    }
-
-    enum OrderState {
-        NEW,
-        SUBMITTED,
-        APPROVED,
-        REJECTED
-    }
-
-    enum OrderEvent {
-        SUBMIT,
-        APPROVE,
-        REJECT
-    }
-
-    record OrderContext(int amount, List<String> audit) {
-    }
+		assertEquals(OrderState.COMPLETED, result.getFinalState());
+		assertEquals(1, result.getSteps());
+	}
 }
